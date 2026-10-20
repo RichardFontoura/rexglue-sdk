@@ -22,6 +22,8 @@
 #include <rex/string.h>
 #include <rex/ui/vulkan/device.h>
 
+#include "dlss_upscaler.h"
+
 REXCVAR_DEFINE_BOOL(vulkan_require_fragment_stores_and_atomics, true, "UI/Vulkan",
                     "Deprecated and ignored for parity; fragmentStoresAndAtomics is always "
                     "required for Vulkan GPU emulation")
@@ -240,6 +242,14 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
     if (properties.apiVersion >= VK_MAKE_API_VERSION(0, 1, 1, 0)) {
       // #237.
       XE_UI_VULKAN_STRUCT_PROMOTED_EXTENSION(KHR_spirv_1_4, 1, 2)
+    }
+  }
+
+  std::unordered_map<std::string, bool> dlss_extensions;
+  if (with_swapchain && VulkanDlssUpscaler::Requested()) {
+    for (const std::string& name :
+         VulkanDlssUpscaler::DeviceExtensions(vulkan_instance->instance(), physical_device)) {
+      requested_extensions.emplace(name, &dlss_extensions[name]);
     }
   }
 
@@ -548,6 +558,8 @@ std::unique_ptr<VulkanDevice> VulkanDevice::CreateIfSupported(
 
   VkPhysicalDeviceFeatures enabled_features = {};
   device_create_info.pEnabledFeatures = &enabled_features;
+  enabled_features.shaderStorageImageExtendedFormats =
+      supported_features.shaderStorageImageExtendedFormats;
 
 #define XE_UI_VULKAN_LIMIT(name)                     \
   device->properties_.name = properties.limits.name; \

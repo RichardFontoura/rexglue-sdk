@@ -61,6 +61,11 @@ endif()
 set(REXGLUE_FIDELITYFX_SOURCE_DIR "${fidelityfx_SOURCE_DIR}" CACHE INTERNAL
     "Root of the fetched FidelityFX SDK source tree")
 
+if(NOT REXGLUE_FIDELITYFX_RUNTIME)
+    message(STATUS "FidelityFX: headers only, temporal FSR2/FSR3 runtime not built")
+    return()
+endif()
+
 # ── Backend selection ────────────────────────────────────────────────────
 set(REXGLUE_FIDELITYFX_BACKEND "auto" CACHE STRING
     "FidelityFX backend to build (auto, vk, dx12)")

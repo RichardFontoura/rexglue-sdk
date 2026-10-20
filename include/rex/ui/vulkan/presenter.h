@@ -58,6 +58,9 @@ class VulkanUIDrawContext final : public UIDrawContext {
   VkFormat render_pass_format_;
 };
 
+class VulkanNisUpscaler;
+class VulkanDlssUpscaler;
+
 class VulkanPresenter final : public Presenter {
  public:
   // Maximum number of different guest output image versions still potentially
@@ -419,16 +422,7 @@ class VulkanPresenter final : public Presenter {
   };
 
   explicit VulkanPresenter(HostGpuLossCallback host_gpu_loss_callback,
-                           const VulkanDevice* vulkan_device, const UISamplers* ui_samplers)
-      : Presenter(host_gpu_loss_callback),
-        vulkan_device_(vulkan_device),
-        ui_samplers_(ui_samplers),
-        guest_output_image_refresher_submission_tracker_(vulkan_device),
-        ui_submission_tracker_(vulkan_device),
-        paint_context_(vulkan_device) {
-    assert_not_null(vulkan_device);
-    assert_not_null(ui_samplers);
-  }
+                           const VulkanDevice* vulkan_device, const UISamplers* ui_samplers);
 
   bool InitializeSurfaceIndependent();
 
@@ -445,8 +439,20 @@ class VulkanPresenter final : public Presenter {
   void DestroyTemporalUpscalerContext();
 #endif
 
+  bool DispatchComputeUpscaler(GuestOutputPaintConfig::Effect effect,
+                               VkCommandBuffer command_buffer, uint64_t submission,
+                               const GuestOutputImage& input, uint32_t input_width,
+                               uint32_t input_height, const GuestOutputImage& output,
+                               uint32_t output_width, uint32_t output_height,
+                               const GuestOutputPaintConfig& config);
+
   const VulkanDevice* vulkan_device_;
   const UISamplers* ui_samplers_;
+
+  std::unique_ptr<VulkanNisUpscaler> nis_upscaler_;
+  std::unique_ptr<VulkanDlssUpscaler> dlss_upscaler_;
+  bool nis_upscaler_attempted_ = false;
+  bool dlss_upscaler_attempted_ = false;
 
   // Static objects for guest output presentation, used only when painting the
   // main target (can be destroyed only after awaiting main target usage

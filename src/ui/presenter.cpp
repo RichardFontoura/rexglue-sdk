@@ -42,8 +42,8 @@ REXCVAR_DEFINE_INT32(present_safe_area_y, 90, "UI/Presenter",
 
 #if defined(REX_HAS_FIDELITYFX_SDK)
 REXCVAR_DEFINE_STRING(present_effect, "bilinear", "UI/Presenter",
-                      "Guest output effect: bilinear, cas, fsr, fsr2, fsr3")
-    .allowed({"bilinear", "cas", "fsr", "fsr2", "fsr3"})
+                      "Guest output effect: bilinear, cas, fsr, fsr2, fsr3, nis, dlss")
+    .allowed({"bilinear", "cas", "fsr", "fsr2", "fsr3", "nis", "dlss"})
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 REXCVAR_DEFINE_DOUBLE(present_cas_additional_sharpness,
@@ -51,6 +51,13 @@ REXCVAR_DEFINE_DOUBLE(present_cas_additional_sharpness,
                       "UI/Presenter", "Additional CAS sharpness in [0, 1]")
     .range(rex::ui::Presenter::GuestOutputPaintConfig::kCasAdditionalSharpnessMin,
            rex::ui::Presenter::GuestOutputPaintConfig::kCasAdditionalSharpnessMax)
+    .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
+
+REXCVAR_DEFINE_DOUBLE(present_nis_sharpness,
+                      rex::ui::Presenter::GuestOutputPaintConfig::kNisSharpnessDefault,
+                      "UI/Presenter", "NVIDIA Image Scaling sharpness in [0, 1]")
+    .range(rex::ui::Presenter::GuestOutputPaintConfig::kNisSharpnessMin,
+           rex::ui::Presenter::GuestOutputPaintConfig::kNisSharpnessMax)
     .lifecycle(rex::cvar::Lifecycle::kRequiresRestart);
 
 REXCVAR_DEFINE_INT32(present_fsr_max_upsampling_passes,
@@ -104,6 +111,12 @@ GuestOutputPaintConfig::Effect ParsePresentEffect(const std::string& effect_name
   }
   if (lowered == "fsr3") {
     return GuestOutputPaintConfig::Effect::kFsr3;
+  }
+  if (lowered == "nis") {
+    return GuestOutputPaintConfig::Effect::kNis;
+  }
+  if (lowered == "dlss") {
+    return GuestOutputPaintConfig::Effect::kDlss;
   }
 #endif
   return GuestOutputPaintConfig::Effect::kBilinear;
@@ -267,6 +280,7 @@ GuestOutputPaintConfig BuildGuestOutputPaintConfigFromCVar() {
       uint32_t(std::max(int32_t(1), REXCVAR_GET(present_fsr_max_upsampling_passes))));
   config.SetFsrSharpnessReduction(float(REXCVAR_GET(present_fsr_sharpness_reduction)));
   config.SetFsrQualityMode(ParsePresentFsrQualityMode(REXCVAR_GET(present_fsr_quality_mode)));
+  config.SetNisSharpness(float(REXCVAR_GET(present_nis_sharpness)));
 #endif
   config.SetDither(REXCVAR_GET(present_dither));
   return config;
@@ -685,6 +699,12 @@ void Presenter::SetGuestOutputPaintConfigFromUIThread(const GuestOutputPaintConf
     request_repaint = true;
   }
 #if defined(REX_HAS_FIDELITYFX_SDK)
+  if (guest_output_paint_config_.GetNisSharpness() != new_config.GetNisSharpness()) {
+    modified = true;
+    if (new_config.GetEffect() == GuestOutputPaintConfig::Effect::kNis) {
+      request_repaint = true;
+    }
+  }
   if (guest_output_paint_config_.GetFsrQualityMode() != new_config.GetFsrQualityMode()) {
     modified = true;
     if (new_config.GetEffect() == GuestOutputPaintConfig::Effect::kFsr2 ||
@@ -1034,7 +1054,9 @@ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
   if (config.GetEffect() == GuestOutputPaintConfig::Effect::kCas ||
       config.GetEffect() == GuestOutputPaintConfig::Effect::kFsr ||
       config.GetEffect() == GuestOutputPaintConfig::Effect::kFsr2 ||
-      config.GetEffect() == GuestOutputPaintConfig::Effect::kFsr3) {
+      config.GetEffect() == GuestOutputPaintConfig::Effect::kFsr3 ||
+      config.GetEffect() == GuestOutputPaintConfig::Effect::kNis ||
+      config.GetEffect() == GuestOutputPaintConfig::Effect::kDlss) {
     // FidelityFX Super Resolution and Contrast Adaptive Sharpening only work
     // good for up to 2x2 upscaling due to the way they fetch texels.
     // CAS is primarily a sharpening filter, not an upscaling one (its upscaling
@@ -1058,13 +1080,31 @@ Presenter::GuestOutputPaintFlow Presenter::GetGuestOutputPaintFlow(
     }
     bool is_temporal_effect = config.GetEffect() == GuestOutputPaintConfig::Effect::kFsr2 ||
                               config.GetEffect() == GuestOutputPaintConfig::Effect::kFsr3;
+    bool is_compute_upscaler = config.GetEffect() == GuestOutputPaintConfig::Effect::kNis ||
+                               config.GetEffect() == GuestOutputPaintConfig::Effect::kDlss;
     bool temporal_quality_mode_forced =
         is_temporal_effect &&
         config.GetFsrQualityMode() != GuestOutputPaintConfig::FsrQualityMode::kAuto;
-    if ((config.GetEffect() == GuestOutputPaintConfig::Effect::kFsr || is_temporal_effect) &&
-        ((ffx_last_size.first < output_width_clamped ||
-          ffx_last_size.second < output_height_clamped) ||
-         temporal_quality_mode_forced)) {
+    if (is_compute_upscaler && (ffx_last_size.first < output_width_clamped ||
+                                ffx_last_size.second < output_height_clamped)) {
+      uint32_t max_scale =
+          config.GetEffect() == GuestOutputPaintConfig::Effect::kDlss ? uint32_t(3) : uint32_t(2);
+      ffx_last_size.first = std::min(ffx_last_size.first * max_scale, output_width_clamped);
+      ffx_last_size.second = std::min(ffx_last_size.second * max_scale, output_height_clamped);
+      assert_true(flow.effect_count + 1 < flow.effects.size());
+      flow.effect_output_sizes[flow.effect_count] = ffx_last_size;
+      flow.effects[flow.effect_count++] = GuestOutputPaintEffect::kFsrEasu;
+      if (config.GetEffect() == GuestOutputPaintConfig::Effect::kDlss) {
+        flow.effect_output_sizes[flow.effect_count] = ffx_last_size;
+        flow.effects[flow.effect_count++] = GuestOutputPaintEffect::kFsrRcas;
+      } else {
+        flow.effect_output_sizes[flow.effect_count] = std::make_pair(output_width, output_height);
+        flow.effects[flow.effect_count++] = GuestOutputPaintEffect::kBilinear;
+      }
+    } else if ((config.GetEffect() == GuestOutputPaintConfig::Effect::kFsr || is_temporal_effect) &&
+               ((ffx_last_size.first < output_width_clamped ||
+                 ffx_last_size.second < output_height_clamped) ||
+                temporal_quality_mode_forced)) {
       // AMD FidelityFX Super Resolution - upsample along at least one axis.
       // Using the output size clamped to the maximum render target size here as
       // EASU will always write to intermediate images, and RCAS supports only

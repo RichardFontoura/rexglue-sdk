@@ -21,6 +21,8 @@
 #include <rex/ui/vulkan/instance.h>
 #include <rex/ui/vulkan/presenter.h>
 
+#include "dlss_upscaler.h"
+
 #if REX_PLATFORM_MAC
 #include "vulkan_moltenvk.h"
 #endif
@@ -165,6 +167,13 @@ std::unique_ptr<VulkanInstance> VulkanInstance::Create(const bool with_surface,
     requested_extensions.emplace("VK_EXT_metal_surface",
                                  &vulkan_instance->extensions_.ext_EXT_metal_surface);
 #endif
+  }
+
+  std::unordered_map<std::string, bool> dlss_extensions;
+  if (with_surface && VulkanDlssUpscaler::Requested()) {
+    for (const std::string& name : VulkanDlssUpscaler::InstanceExtensions()) {
+      requested_extensions.emplace(name, &dlss_extensions[name]);
+    }
   }
 
   std::vector<const char*> enabled_extensions;

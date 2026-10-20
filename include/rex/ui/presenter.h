@@ -225,6 +225,8 @@ class Presenter {
       // where available; currently still experimental due to limited temporal
       // inputs in the presenter path.
       kFsr3,
+      kNis,
+      kDlss,
 #endif
     };
 
@@ -260,6 +262,10 @@ class Presenter {
     static constexpr float kFsrSharpnessReductionDefault = 0.2f;
     static_assert(kFsrSharpnessReductionDefault >= kFsrSharpnessReductionMin &&
                   kFsrSharpnessReductionDefault <= kFsrSharpnessReductionMax);
+
+    static constexpr float kNisSharpnessMin = 0.0f;
+    static constexpr float kNisSharpnessMax = 1.0f;
+    static constexpr float kNisSharpnessDefault = 0.5f;
 #endif  // defined(REX_HAS_FIDELITYFX_SDK)
 
     // In the sharpness setters, min / max with a constant as the first argument
@@ -299,6 +305,11 @@ class Presenter {
     void SetFsrQualityMode(FsrQualityMode new_fsr_quality_mode) {
       fsr_quality_mode_ = new_fsr_quality_mode;
     }
+
+    float GetNisSharpness() const { return nis_sharpness_; }
+    void SetNisSharpness(float new_nis_sharpness) {
+      nis_sharpness_ = std::min(kNisSharpnessMax, std::max(kNisSharpnessMin, new_nis_sharpness));
+    }
 #endif  // defined(REX_HAS_FIDELITYFX_SDK)
 
     // Very tiny effect, but highly noticeable, for instance, on the sky in the
@@ -319,6 +330,7 @@ class Presenter {
     uint32_t fsr_max_upsampling_passes_ = kFsrMaxUpscalingPassesMax;
     float fsr_sharpness_reduction_ = kFsrSharpnessReductionDefault;
     FsrQualityMode fsr_quality_mode_ = FsrQualityMode::kAuto;
+    float nis_sharpness_ = kNisSharpnessDefault;
 #endif
     bool dither_ = false;
   };
