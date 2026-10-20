@@ -33,7 +33,9 @@ set(REXUI_OVERLAY_SOURCES
 
 # Vulkan UI backend
 set(REXUI_VULKAN_SOURCES
+    vulkan/dlss_upscaler.cpp
     vulkan/linked_type_descriptor_set_allocator.cpp
+    vulkan/nis_upscaler.cpp
     vulkan/vulkan_moltenvk.cpp
     vulkan/single_layout_descriptor_set_pool.cpp
     vulkan/spirv_tools_context.cpp
@@ -121,7 +123,19 @@ if(REXGLUE_FIDELITYFX_SOURCE_DIR AND EXISTS "${REXGLUE_FIDELITYFX_SOURCE_DIR}/sd
         "${REXGLUE_FIDELITYFX_SOURCE_DIR}/sdk/include"
         "${REXGLUE_FIDELITYFX_SOURCE_DIR}/ffx-api/include"
     )
-    target_compile_definitions(rexui PRIVATE REX_HAS_FIDELITYFX_SDK=1)
+    target_compile_definitions(rexui PUBLIC REX_HAS_FIDELITYFX_SDK=1)
+endif()
+
+if(REXGLUE_USE_VULKAN)
+    target_include_directories(rexui PRIVATE ${REXGLUE_ROOT}/thirdparty/nis)
+    install(FILES "${REXGLUE_ROOT}/thirdparty/nis/LICENSE.txt"
+        DESTINATION "${CMAKE_INSTALL_DATADIR}/rexglue/licenses" RENAME NIS-LICENSE.txt)
+endif()
+
+if(REXGLUE_DLSS_INCLUDE_DIR)
+    target_include_directories(rexui PRIVATE "${REXGLUE_DLSS_INCLUDE_DIR}")
+    target_link_libraries(rexui PRIVATE "${REXGLUE_DLSS_LIBRARY}" ${CMAKE_DL_LIBS})
+    target_compile_definitions(rexui PUBLIC REX_HAS_DLSS=1)
 endif()
 
 set(REXUI_HAS_FIDELITYFX_RUNTIME OFF)

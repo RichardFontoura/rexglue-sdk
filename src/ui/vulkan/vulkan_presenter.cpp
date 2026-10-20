@@ -27,6 +27,9 @@
 #include <rex/ui/vulkan/presenter.h>
 #include <rex/ui/vulkan/util.h>
 
+#include "dlss_upscaler.h"
+#include "nis_upscaler.h"
+
 #if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
 #include <ffx_api/ffx_api.h>
 #include <ffx_api/ffx_upscale.h>
@@ -189,6 +192,18 @@ bool VulkanPresenter::PaintContext::Submission::Initialize() {
   return true;
 }
 
+VulkanPresenter::VulkanPresenter(HostGpuLossCallback host_gpu_loss_callback,
+                                 const VulkanDevice* vulkan_device, const UISamplers* ui_samplers)
+    : Presenter(host_gpu_loss_callback),
+      vulkan_device_(vulkan_device),
+      ui_samplers_(ui_samplers),
+      guest_output_image_refresher_submission_tracker_(vulkan_device),
+      ui_submission_tracker_(vulkan_device),
+      paint_context_(vulkan_device) {
+  assert_not_null(vulkan_device);
+  assert_not_null(ui_samplers);
+}
+
 VulkanPresenter::~VulkanPresenter() {
   // Destroy the swapchain after its images are not used for drawing anymore.
   // This is a confusing part in Vulkan, as vkQueuePresentKHR doesn't signal a
@@ -210,6 +225,8 @@ VulkanPresenter::~VulkanPresenter() {
 #if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
   DestroyTemporalUpscalerContext();
 #endif
+  nis_upscaler_.reset();
+  dlss_upscaler_.reset();
 
   const VulkanDevice::Functions& dfn = vulkan_device_->functions();
   const VkDevice device = vulkan_device_->device();
@@ -416,6 +433,80 @@ bool VulkanPresenter::DispatchTemporalUpscaler(VkCommandBuffer command_buffer, V
   return true;
 }
 #endif
+
+bool VulkanPresenter::DispatchComputeUpscaler(
+    [[maybe_unused]] GuestOutputPaintConfig::Effect effect, VkCommandBuffer command_buffer,
+    uint64_t submission, const GuestOutputImage& input, uint32_t input_width,
+    uint32_t input_height, const GuestOutputImage& output, uint32_t output_width,
+    uint32_t output_height, [[maybe_unused]] const GuestOutputPaintConfig& config) {
+#if defined(REX_HAS_FIDELITYFX_SDK)
+  const bool use_dlss = effect == GuestOutputPaintConfig::Effect::kDlss;
+  if (use_dlss && !dlss_upscaler_attempted_) {
+    dlss_upscaler_attempted_ = true;
+    dlss_upscaler_ = VulkanDlssUpscaler::Create(vulkan_device_);
+    if (!dlss_upscaler_) {
+      REXLOG_WARN("VulkanPresenter: DLSS is unavailable, falling back to FSR");
+    }
+  }
+  if (!use_dlss && !nis_upscaler_attempted_) {
+    nis_upscaler_attempted_ = true;
+    nis_upscaler_ = VulkanNisUpscaler::Create(
+        vulkan_device_, ui_samplers_->samplers()[UISamplers::kSamplerIndexLinearClampToEdge]);
+    if (!nis_upscaler_) {
+      REXLOG_WARN("VulkanPresenter: NVIDIA Image Scaling is unavailable, falling back to FSR");
+    }
+  }
+  if (use_dlss ? !dlss_upscaler_ : !nis_upscaler_) {
+    return false;
+  }
+
+  const VulkanDevice::Functions& dfn = vulkan_device_->functions();
+  std::array<VkImageMemoryBarrier, 2> barriers = {};
+  for (VkImageMemoryBarrier& barrier : barriers) {
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.subresourceRange = util::InitializeSubresourceRange();
+  }
+  barriers[0].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+  barriers[0].oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  barriers[0].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  barriers[0].image = input.image();
+  barriers[1].dstAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+  barriers[1].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+  barriers[1].newLayout = VK_IMAGE_LAYOUT_GENERAL;
+  barriers[1].image = output.image();
+  dfn.vkCmdPipelineBarrier(command_buffer,
+                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0, nullptr, 0, nullptr,
+                           uint32_t(barriers.size()), barriers.data());
+
+  bool dispatched;
+  if (use_dlss) {
+    dispatched = dlss_upscaler_->Dispatch(command_buffer, paint_context_.submission_tracker,
+                                          submission, input.image(), input.view(), input_width,
+                                          input_height, output.image(), output.view(),
+                                          output_width, output_height);
+  } else {
+    dispatched = nis_upscaler_->Dispatch(command_buffer, paint_context_.submission_tracker,
+                                         submission, input.view(), input_width, input_height,
+                                         output.view(), output_width, output_height,
+                                         config.GetNisSharpness());
+  }
+
+  VkImageMemoryBarrier& output_barrier = barriers[1];
+  output_barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+  output_barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+  output_barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+  output_barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+  dfn.vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1,
+                           &output_barrier);
+  return dispatched;
+#else
+  return false;
+#endif
+}
 
 Surface::TypeFlags VulkanPresenter::GetSurfaceTypesSupportedByInstance(
     const VulkanInstance::Extensions& instance_extensions) {
@@ -1868,6 +1959,12 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
             guest_output_paint_config.GetEffect() == GuestOutputPaintConfig::Effect::kFsr2 ||
             guest_output_paint_config.GetEffect() == GuestOutputPaintConfig::Effect::kFsr3;
 #endif
+        [[maybe_unused]] bool compute_upscaler_selected = false;
+#if defined(REX_HAS_FIDELITYFX_SDK)
+        compute_upscaler_selected =
+            guest_output_paint_config.GetEffect() == GuestOutputPaintConfig::Effect::kNis ||
+            guest_output_paint_config.GetEffect() == GuestOutputPaintConfig::Effect::kDlss;
+#endif
         for (size_t i = 0; i < guest_output_flow.effect_count; ++i) {
           bool is_final_effect = i + 1 >= guest_output_flow.effect_count;
           GuestOutputPaintEffect effect = guest_output_flow.effects[i];
@@ -1894,6 +1991,23 @@ Presenter::PaintResult VulkanPresenter::PaintAndPresentImpl(bool execute_ui_draw
             guest_output_flow.output_y = 0;
             guest_output_flow.letterbox_clear_rectangle_count = 0;
           }
+#if defined(REX_HAS_FIDELITYFX_SDK)
+          if (compute_upscaler_selected && effect == GuestOutputPaintEffect::kFsrEasu &&
+              !is_final_effect) {
+            const GuestOutputImage& source =
+                i ? *paint_context_.guest_output_intermediate_images[i - 1] : *guest_output_image;
+            uint32_t effect_input_width = 0, effect_input_height = 0;
+            guest_output_flow.GetEffectInputSize(i, effect_input_width, effect_input_height);
+            if (DispatchComputeUpscaler(guest_output_paint_config.GetEffect(), draw_command_buffer,
+                                        current_paint_submission_index, source, effect_input_width,
+                                        effect_input_height,
+                                        *paint_context_.guest_output_intermediate_images[i],
+                                        effect_rect_size.first, effect_rect_size.second,
+                                        guest_output_paint_config)) {
+              continue;
+            }
+          }
+#endif
 #if defined(REX_HAS_FIDELITYFX_RUNTIME) && REX_HAS_FIDELITYFX_RUNTIME
           bool use_temporal_upscaler =
               temporal_effect_selected && effect == GuestOutputPaintEffect::kFsrEasu;
